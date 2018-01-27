@@ -1,0 +1,1396 @@
+---
+fig.retina = 2
+---
+
+Explore and Summarize Data with R
+========================================================
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# Load all of the packages that you end up using in your analysis in this code
+# chunk.
+
+# Set the locale to english
+Sys.setlocale("LC_TIME", "C")
+
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(treemap)
+library(gridExtra)
+library(forecast)
+library(scales)
+library(padr)
+library(TSA)
+library(zoo)
+library(rworldmap)
+library(RColorBrewer)
+library(pastecs)
+library(cowplot)
+```
+
+# Description
+
+This report explores a dataset containing all the actual transactions occurring between 01/12/2010 and 09/12/2011 for a UK-based and registered non-store online retail. The company mainly sells unique all-occasion gifts. Many customers of the company are wholesalers.
+
+# Univariate Plots Section
+
+```{r echo=FALSE, Load_the_Data}
+# Load the Data
+df <- fread('data.csv')
+
+# Check how many nulls there are
+na_count <-function (x) lapply(x, function(y) sum(is.na(y)))
+```
+
+```{r echo=FALSE, Wrangle_the_Data}
+# Set the date format
+df$InvoiceDate <- as.POSIXct(df$InvoiceDate, format="%m/%d/%Y %H:%M")
+
+# Rename to reflect that there is a time element
+df <- rename(df, 'InvoiceDateTime' = 'InvoiceDate')
+
+# Create separate features for datetime components 
+df$Date <- as.Date(df$InvoiceDateTime)
+df$InvoiceYear <- lubridate::year(df$InvoiceDateTime)
+df$InvoiceMonth <- lubridate::month(df$InvoiceDateTime, label=TRUE, abbr = TRUE)
+df$InvoiceWday <- lubridate::wday(df$InvoiceDateTime, label=TRUE)
+df$InvoiceHour <- lubridate::hour(df$InvoiceDateTime)
+
+#Drop the nulls
+df <- na.omit(df)
+
+# make a total value column
+df$Value <- df$UnitPrice * df$UnitPrice
+
+# View and summarize the data
+data.frame(na_count(df))
+head(df)
+str(df)
+```
+
+After the transformations our dataset consists of 14 variables, with 406,829 observations and no nulls.
+
+```{r echo=FALSE, functions}
+
+factor_distribution <- function(df, variable, binwidth= 1, transform='') {
+  # Plot a histogram and a boxplot of the unique value count frequncies.
+  freqs <- table(df[[variable]]) %>%
+                 as.data.frame() 
+  
+  if (transform == 'log') {
+    freqs$Freq <- log10(freqs$Freq) 
+  }
+  if (transform == 'sqrt') {
+    freqs$Freq <- sqrt(freqs$Freq) 
+  }
+  
+  hist <- ggplot(data=freqs, aes(x=Freq)) +
+          geom_histogram(binwidth = binwidth) +
+          ggtitle(paste(variable, ' value_counts frequency distribution')) + 
+          labs(x = '')
+          
+  box <-  ggplot(data=freqs, aes(x= paste(variable), y = Freq)) +
+          geom_boxplot() + 
+          coord_flip() +
+          labs(title="", y =paste(variable, "frequency"), x = '') +
+          theme(axis.title.y=element_blank(),
+                axis.text.y=element_blank(),
+                axis.ticks.y=element_blank()) 
+  
+  print(cowplot::plot_grid(hist, box, rel_heights=c(0.65, 0.35), ncol = 1, align = "v"))
+  
+  return(freqs)
+}
+
+outlier_percentage <- function(freq_df) {
+  # Calculate and print the percentage of outliers over the upper boxplot notch.
+upperNotch <- median(freq_df$Freq) + 1.58 * IQR(freq_df$Freq)
+outlierNo <- freq_df %>% filter(Freq>upperNotch) %>% nrow()
+totalNo <- nrow(freq_df)
+outlierPercentage <- round((outlierNo/totalNo) * 100, 2)
+
+cat('\nOutliers are', outlierPercentage, '% of the total occurences\n')
+}
+
+plot_top_freqs <- function(freqs, variable, fill, n=50) {
+  # calculate the top n frequencies from a variable and plot as a horizontal bar plot
+  top_freqs <- freqs[order(freqs$Freq, 
+                                     decreasing = TRUE),] %>%
+                                      head(n=n)
+  
+  bars <- ggplot(top_freqs, aes(x=reorder(Var1, Freq), y=Freq)) + 
+             geom_bar(stat="identity", fill=fill, colour="black") + 
+             coord_flip() +
+             theme_bw(base_size = 10)  +
+             labs(title="", y ="occurences", x = variable)
+  plot(bars)
+  
+  return(top_freqs)
+}
+```
+
+```{r echo=FALSE, InvoiceNo_value_counts_distribution}
+
+# Plot a histogram and boxplot of the unique value count frequncies.
+# Each occurence of an invoiceno marks a unique transaction.
+# This is equivalent to the basket size
+invoicenoFreqs <- factor_distribution(df, 'InvoiceNo', transform = '')
+summary(invoicenoFreqs$Freq)
+outlier_percentage(invoicenoFreqs)
+df %>% distinct(InvoiceNo) %>% nrow() %>% paste('No of distinct InvoiceNos')
+```
+
+Each occurrence of an `InvoiceNo` marks a unique transaction. The number an `InvoiceNo` appears is equivalent to the basket size.
+
+We observe an extremely right skewed distribution with a prevalence of 1 item orders with a third quartile of 24 and a max of 524 occurrences and a quite few outliers in between.
+
+- There are 22190 distinct Invoice Nos (including cancellations).
+
+```{r echo=FALSE,  InvoiceDateTime_dist}
+
+# Plot a histogram and boxplot of the unique value count frequencies.
+InvoiceDateTimeFreqs = factor_distribution(df, 'InvoiceDateTime')
+summary(InvoiceDateTimeFreqs$Freq)
+outlier_percentage(InvoiceDateTimeFreqs)
+```
+
+`InvoiceDateTime` is the time stamp of every transaction and it's frequency distribution  is the same as of `InvoiceNo`.
+
+The summary statistics look slightly different to the 'InvoiceNo' although they should look the same. I wonder why that is.
+
+How does the number of transactions look over time??
+
+```{r echo=F}
+df %>%
+    group_by(Date) %>%
+    summarize(n = n()) %>%
+    ggplot(aes(x = Date, y = n)) +
+    geom_col() + 
+    labs(x='', y='Number of transactions', title='Number of transactions over time')
+```
+
+We observe the number of transactions decreasing towards the beginning of 2011 and a sharp increase in the number of transactions in the last quarter of 2011
+
+```{r echo=FALSE, StockCode_counts_distribution}
+stockcodefreqs <- factor_distribution(df, 'StockCode')
+summary(stockcodefreqs$Freq)
+outlier_percentage(stockcodefreqs)
+```
+
+```{r echo=FALSE, Description_counts_distribution}
+description_freqs <- factor_distribution(df, 'Description')
+summary(description_freqs$Freq)
+outlier_percentage(description_freqs)
+```
+
+The distributions are right skewed with a prevalence of 1 occurrence.  
+
+```{r echo=FALSE}
+# get the total number of distinct values
+df %>% distinct(StockCode) %>% nrow() %>% paste('No of distinct stock codes')
+df %>% distinct(Description) %>% nrow() %>% paste('No of distinct descriptions')
+
+```
+
+`Stockcode`and `Description` should be representing the same thing which is the unique stock items (3885) described either by a code or by a human-readable description. There is a discrepancy of 200 distinct itmes.
+
+The distributions are very similar but the summary statistics are different. What could be the reason? 
+
+```{r echo=FALSE}
+# Find StockCode that does not start with a number
+df[grep("^[^0-9]", df$StockCode), ][1:10,]
+```
+
+We see that there are descriptions of generic transactions that are not equivalent to sales and therefore there does not exist a one to one relationship between `StockCode` and `Description`.
+
+`Discount` at `Description` means a cancelled order winch is denoted with a `D` at the `StockCode` and a `C` at the start of the `InvoiceNo`
+
+How many are there?
+
+```{r echo=FALSE}
+# Find StockCode that does not start with a number
+extraCodes <- df[grep("^[^0-9]", df$StockCode), ] %>% 
+                group_by(StockCode, Description) %>%
+                summarise(n = n()) %>%
+                ungroup() %>%
+                arrange(desc(n))
+extraCodes
+totTransactionsNo <- sum(extraCodes$n)
+paste('The number of special transactions in the ddataset are : ', totTransactionsNo)
+```
+
+1920 is much less than the total number of invoices.
+
+Let's have a look at the top 20 descriptions by the number of occurrences.
+
+```{r echo=FALSE, , fig.height = 10}
+description_top_freqs <- plot_top_freqs(description_freqs, 'Description', 'tomato')
+```
+
+```{r echo=FALSE,  Treemap_Description}
+
+treemap(description_top_freqs, 
+        index=c("Var1"), 
+        vSize = "Freq",  
+        palette = "Reds",  
+        title="Description Treemap", 
+        fontsize.labels = 8 
+)
+```
+
+- The first 6 descriptions have a significantly higher number of occurrences than the rest. 
+- The top items are a light holder a cacestand and a restorsport bag wich gives as an idea about the sot of items the onli store is seelling
+- `Postage` which is a generic description is included in the top 10.
+
+```{r echo=FALSE, warning=FALSE}
+
+hist1 <- ggplot(data=df, aes(x=Quantity)) +
+      geom_histogram(binwidth = 10) +
+      labs(title='Quantity Distribution', x = '')
+
+box1 <-  
+  ggplot(data=df, aes(y= Quantity, x = factor(0))) +
+        geom_boxplot() +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+```
+
+```{r echo=FALSE, warning=FALSE}
+
+hist1 <- ggplot(data=df, aes(x=Quantity)) +
+      geom_histogram(binwidth = 10) +
+      xlim(-1000, 1000) +
+      labs(title='Quantity Distribution', x = '')
+
+box1 <-  
+  ggplot(data=df, aes(y= Quantity, x = factor(0))) +
+        geom_boxplot() +
+        ylim(-1000, 1000) +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+```
+
+
+```{r echo=FALSE, warning=FALSE, fig.height = 6, fig.width = 8}
+n = nrow(df)
+upperhinge = median(df$Quantity) + 1.58 * IQR(df$Quantity)/sqrt(n)
+lowerhinge = median(df$Quantity) - 1.58 * IQR(df$Quantity)/sqrt(n)
+
+hist1 <- ggplot(data=df, aes(x=Quantity)) +
+      geom_histogram(binwidth = 1) +
+      xlim(-50, 50 ) +
+      labs(title='Quantity Distribution', x = '')
+
+box1 <-  
+  ggplot(data=df, aes(y= Quantity, x = factor(0))) +
+        geom_boxplot() +
+        ylim(-50, 50) +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+```
+
+```{r echo=FALSE}
+# summary(df$Quantity)
+stat.desc(df$Quantity)
+quant <- select(df, Freq = Quantity)
+outlier_percentage(quant)
+```
+
+We observe huge variance (6.184839e+04) and big symmetric outliers on both side. Limited the range of the x axis in steps to get a better idea of the distribution. 
+
+ - A min and max of -/+ 80995 which could be big cancelled orders.
+ - Values are more symmetric the bigger they get which suggest that most big orders get's cancelled.
+
+We observe prevalence of orders with `Quantity` less than 25 with a big peak at 12 which is also the upper quartile range.
+
+How many negative values are there (Means cancelled orders)?
+
+```{r echo=FALSE,  Quantity_negs}
+df[df$Quantity<0] %>% nrow()
+```
+```{r echo=FALSE, warning=FALSE}
+
+hist1 <- ggplot(data=df, aes(x=UnitPrice)) +
+      geom_histogram(binwidth = 10) +
+      # xlim(0, 1000) +
+      labs(title='UnitPrice Distribution', x = '')
+
+hist2 <- ggplot(data=df, aes(x=UnitPrice)) +
+      geom_histogram(binwidth = 10) +
+      # xlim(0, 1000) +
+      scale_x_log10()+
+      labs(title='log10 UnitPrice Distribution', x = '')
+
+grid.arrange(hist1, hist2, ncol = 2)
+```
+
+
+
+```{r echo=FALSE, warning=FALSE}
+
+hist1 <- ggplot(data=df, aes(x=UnitPrice)) +
+      geom_histogram(binwidth = 10) +
+      labs(title='UnitPrice Distribution', x = '')
+
+box1 <-  
+  ggplot(data=df, aes(y= UnitPrice, x = factor(0))) +
+        geom_boxplot() +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+
+hist1 <- ggplot(data=df, aes(x=UnitPrice)) +
+      geom_histogram(binwidth = 10) +
+      xlim(0, 1000) +
+      labs(title='UnitPrice Distribution', x = '')
+
+box1 <-  
+  ggplot(data=df, aes(y= UnitPrice, x = factor(0))) +
+        geom_boxplot() +
+        ylim(0, 1000) +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+
+hist1 <- ggplot(data=df, aes(x=UnitPrice)) +
+      geom_histogram(binwidth = 1) +
+      xlim(0, 50) +
+      labs(title='UnitPrice Distribution', x = '')
+
+box1 <-  
+  ggplot(data=df, aes(y= UnitPrice, x = factor(0))) +
+        geom_boxplot() +
+        ylim(0, 50) +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+```
+```{r echo=FALSE}
+stat.desc(df$UnitPrice)
+price <- select(df, Freq = UnitPrice)
+outlier_percentage(price)
+```
+
+
+```{r echo=FALSE,  UnitPrice_FrequencyandSummary}
+
+# Which are the prices with the higher occurences
+price_freqs <- table(df$UnitPrice) %>%
+               as.data.frame() 
+
+UnitPrice_top_freqs <- plot_top_freqs(freqs = price_freqs, variable = 'UnitPrice', fill = 'green', 20)
+```
+
+- The distriubution is so right skewed that it doees not even get plotted as a histogram. After transfoming to log10 the `Unitprice` distribution looks uniform.
+
+We again limited the the range of the occurrences take a better look.
+
+- There is a huge outlier that at 38970 Sterling that is skewing the distribution extremely to the right. I wonder what this item is.
+- Average price is 1.25 which is also the mode with a  median of 1.95 and a minimum of 0!
+
+I wonder which items have 0 price.
+
+```{r echo=FALSE, warning=FALSE, Value_histograms}
+
+# hist1 <- ggplot(data=df, aes(x=Value)) +
+#       geom_histogram(binwidth = 10) +
+#       labs(title='Value Distribution', x = '')
+# 
+# box1 <-
+#   ggplot(data=df, aes(y= Value, x = factor(0))) +
+#         geom_boxplot() +
+#         coord_flip() +
+#      theme(axis.title.y=element_blank(),
+#           axis.text.y=element_blank(),
+#           axis.ticks.y=element_blank())
+# 
+# cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+
+# Plotting the whole df hangs rstudio and the whole os
+hist1 <- ggplot(data=df, aes(x=Value)) +
+      geom_histogram(binwidth = 10) +
+      xlim(0, 10000) +
+      labs(title='Value Distribution', x = '')
+
+box1 <-
+  ggplot(data=df, aes(y= Value, x = factor(0))) +
+        geom_boxplot() +
+        ylim(0, 10000) +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+
+hist1 <- ggplot(data=df, aes(x=Value)) +
+      geom_histogram(binwidth = 1) +
+      xlim(0, 50) +
+      labs(title='Value Distribution', x = '')
+
+box1 <-  
+  ggplot(data=df, aes(y= Value, x = factor(0))) +
+        geom_boxplot() +
+        ylim(0, 50) +
+        coord_flip() +
+     theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+cowplot::plot_grid(hist1, box1, rel_heights=c(0.65, 0.35), ncol = 1, align = "v")
+```
+
+```{r echo=FALSE, warning=FALSE, Value_summary}
+summary(df$Value)
+value <- select(df, Freq = Value)
+outlier_percentage(value)
+```
+
+Zoomed in below the 10.000 to be able to vsualize the distribution.
+
+- The maximum order value is 1.519e+09 and looks like an extreme outlier since it is pretty far away from the 3rd Quartile which is 14.
+- The outlier percentage at 17.73% is higher than the others we have seen until now.
+
+```{r echo=FALSE, CustomerID_counts_distribution}
+customerid_freqs <- factor_distribution(df, 'CustomerID')
+summary(customerid_freqs$Freq)
+outlier_percentage(customerid_freqs)
+```
+
+- The frequency distribution here is similar to the previous ones with most `customerid` occurrences at 1.
+- One customerid appears 7983 times which is quite higher than  the average frequency, which is 93.05.
+
+```{r echo=FALSE, Country_counts_distribution}
+country_freqs <- factor_distribution(df, 'Country')
+summary(country_freqs$Freq)
+outlier_percentage(country_freqs)
+```
+
+- The distribution is so right skewed it does not even show at the histogram.
+- The mean (10995)  is  15 times higher than the median (358).
+- The max (UK) at 361878 occurrences is very far from the main the rest of the distribution but since it is where the majority of transactions are happening
+
+How many countries are there and which have the highest occurrences?
+
+```{r echo=FALSE,  country_top_freqs}
+
+# Which are the coountries with the higher occurences
+country_top_freqs <- plot_top_freqs(freqs = country_freqs, variable = 'Country', fill = 'mediumpurple', 37)
+
+#Calculate the percentages
+prop.table(country_top_freqs$Freq)
+```
+
+UK is dominating the countries with 88.9% of occurrences which makes the sense since that is where the online store is based.
+
+- We observe another small group of countries (Germany, France, Eire) above  the others that have a much higher number of occurrences than the rest.
+
+# Univariate Analysis
+
+### What is the structure of your dataset?
+
+#### Original Dataset Variables
+
+- **InvoiceNo**: Invoice number. Nominal, a 6-digit integral number uniquely assigned to each transaction. If this code starts with letter 'c', it indicates a cancellation. 
+- **StockCode**: Product (item) code. Nominal, a 5-digit integral number uniquely assigned to each distinct product. 
+- **Description**: Product (item) name. Nominal. 
+- **UnitPrice**: The quantities of each product (item) per transaction. Numeric.	
+- **InvoiceDate**: Invice Date and time. Numeric, the day and time when each transaction was generated. 
+- **UnitPrice**: Unit price. Numeric, Product price per unit in sterling. 
+- **CustomerID**: Customer number. Nominal, a 5-digit integral number uniquely assigned to each customer. 
+- **Country**: Country name. Nominal, the name of the country where each customer resides.
+
+- `InvoiceNo`, `StockCode`, `Description`, `CustomerI`D and `Country` are categorical
+variables
+- `Quantity`, `UnitPrice` and `Value` are numeric variables
+- `InvoiceDateTime` is a datetime variable
+
+After the transformations our dataset consists of 14 features( InvoiceNo, 
+StockCode, Description, Quantity, InvoiceDateTime, InvoiceMonth, InvoiceWday and InvoiceHour UnitPrice, CustomerID, Country, Value, with 406,829 observations and no nulls.
+
+#### Main Oservations: 
+
+ - The frequency distribution of `InvoiceNo`, `StockCode`, `Description`, `CustomerID`
+ is extremely right skewed with a prevalence of 1 occurrence
+- UK is the country where the most orders come from (88.9%)
+- There is a discrepancy between `Description` and and `Stockcode` distinct value- counts which should be identical in theory.
+- `Description` and and `Stockcode` and description include 1920 special transactions that do not correspond to specific items but are connected to logistical transactions for some of the Invoices. This represents a small portion of the total invoices though.
+- Most orders are placed towards the end of 2011.
+- 8,895 of the orders have been cancelled. It looks like most of them are the big outlying orders.
+
+### What is/are the main feature(s) of interest in your dataset?
+
+`InvoiceDateTime` and it's components, `Value`, `Unitprice` and `Quantity`. I would like to explore the correlation between the Datetime features(Month, Day, Hour) and the revenue  the Unit price and the country.
+
+### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+
+`Country`, `CustomerID`, `StockCode`/`Description`
+
+### Did you create any new variables from existing variables in the dataset?
+
+I created the `Value` variable by multiplying `UnitPrice` and `Quantity` to have a measure of the value in Sterling of an item order. I also extracted the `InvoiceMonth`, `InvoiceWday` and `InvoiceHour` fr `InvoiceDatetime` to analyze the monthly, weekly and hourly purchase patterns.
+
+### Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+After loading, our dataset consisted of eight variables, with 541,909 observations.
+
+There where 135,080 rows where the `CustomerId` variable has missing values
+(null).
+
+We perform the following transformations:
+
+- Convert the `InvoiceDateTime` column to a datetime format.
+- Extract `InvoiceMonth`, `InvoiceWday` and `InvoiceHour` variable from the `InvoiceDateTime` variable.
+- Drop all the rows with null `CustomerId` since they are not useful 
+for our analysis
+- Create a Value variable to get the total value for each transaction 
+by multiplying `UnitPrice` with `UnitPrice`.
+
+# Bivariate Plots Section
+
+## InvoiceDateTime
+
+How does InvoiceDateTime correlate with value.
+
+We will group are values to daily observations and plot them. 
+
+```{r echo=FALSE, no_transactios_per_date}
+p1 <- aggregate(cbind(no_transactions = InvoiceNo) ~ Date, 
+          data = df, 
+          FUN = function(x){NROW(x)}) %>%
+          ggplot(aes(Date, no_transactions)) +
+          geom_line() +
+          labs(x = "Invoice Date") + 
+          ggtitle('No of transactions per Date')
+
+p2 <- aggregate(cbind(revenue = Value) ~ Date, 
+          data = df, 
+          FUN = sum) %>%
+          ggplot(aes(x = Date, y = revenue, color = 'indianred')) +
+          geom_line() +
+          guides(colour=FALSE) +
+          labs(x = "Invoice Date") + 
+          ggtitle('Sum of Revenue per Date')
+
+grid.arrange(p1, p2, nrow = 2)
+```
+
+There seems to be one transaction with a very high value (the outlier we found
+earlier), that is skewing the results. Let's plot it without this value.
+
+```{r echo=FALSE}
+aggregate(cbind(revenue = Value) ~ Date, 
+          data = df[df$Value < 1.5e+9 ], 
+          FUN = sum) %>%
+      ggplot(aes(x = Date, y = revenue, color = 'indianred')) +
+      geom_line() +
+      guides(colour=FALSE) +
+      labs(x = "Invoice Date") + 
+      ggtitle('Sum of Revenue per Date (Without the max Value)')
+```
+
+There is more information now, but there is still a number of values (as we saw in the univariate analysis) that are on a totally different scale than the majority of the values. 
+
+```{r echo=FALSE}
+aggregate(cbind(revenue = Value) ~ Date, 
+          data = df[df$Value < quantile(df$Value, 0.99)], 
+          FUN = sum) %>%
+      ggplot(aes(x = Date, y = revenue, color = 'indianred')) +
+      geom_line() +
+      guides(colour=FALSE) +
+      labs(x = "Invoice Date") + 
+      ggtitle('Sum of Revenue per Day (Until the 99th quatile of Value)')
+```
+
+Our assumption was true. There are still a lot of volatility but a more clear trend can be persevered now that is consistent with the number of transactions trend. 
+
+Revenue drops of abruptly in December 2011 and this due to the fact that the whole month is not included. We will subset the data to exclude this month.
+
+```{r, echo=FALSE}
+
+#The subsetted dataframe
+dfs = df[df$Value < quantile(df$Value, 0.99) & df$Date < '2011-11-30']
+
+aggregate(cbind(revenue = Value) ~ Date, 
+          data = dfs, 
+          FUN = sum) %>%
+          ggplot(aes(x = Date, y = revenue, color = 'indianred')) +
+          geom_line() +
+          guides(colour=FALSE) +
+          labs(x = "Invoice Date") + 
+          ggtitle('Sum of Revenue per Day (Until the 99th quatile of Value)')
+```
+
+We have now a dataset that starts at the end November 2010 and and ends at the end of November 2011, 13 months in total.
+
+
+```{r, echo=F}
+daily_rev <- df %>% 
+            mutate(Date = as.Date(df$InvoiceDateTime)) %>%
+            filter(df$Value < quantile(df$Value, 0.99) & df$Date < '2011-12-1') %>%
+            group_by(Date) %>%
+            summarise(revenue = sum(Value)) 
+  
+ggplot(aes(x = Date, y = revenue, group = 1), data = daily_rev) +
+    geom_line() +
+      geom_smooth(method = "loess", color = "blue", span = 1/13)+
+      geom_smooth(method = "loess", color = "orange", span = 1) +
+      scale_x_date(breaks = date_breaks("months"), date_labels = "%b-%y") + 
+      theme(axis.text.x = element_text(angle = 45)) + 
+      labs(x = "Invoice Date") + 
+      ggtitle('Sum of Revenue per Day (Until the 99th quantile of Value)')
+
+```
+
+We plotted the data using he `loess` smoothing method and monthly and yearly re-sampling.
+Here the orange line represents the yearly trend and the blue line the monthly trend.
+
+- We observe a great amount of volatility where values drop very low and rise very high in a short time period.
+
+Let's zoom in to the middle of our time period.
+
+```{r, echo=F, warning=F, message=F}
+
+daily_rev %>% filter((daily_rev$Date > '2011-3-1') & (daily_rev$Date < '2011-9-1')) %>%
+
+ggplot(aes(x = Date, y = revenue, group = 1)) +
+geom_line() +
+  geom_smooth(method = "loess", color = "blue", span = 1/6)+
+  geom_smooth(method = "loess", color = "orange", span = 6/12) +
+  scale_x_date(breaks = date_breaks("months"), date_labels = "%b-%y") + 
+  theme(axis.text.x = element_text(angle = 45)) + 
+  labs(x = "Invoice Date") 
+```
+
+We observe what seems to be a monthly seasonality with the peak towards the middle of the month and steady and very slightly declining trend until around September 2011 where the revenue picks up.
+
+We will plot it using the moving average to compare to the `loess` method we used above.
+
+```{r, echo=F, message=F, warning=F}
+daily_rev <- na.omit(daily_rev)
+# All NAs have to be ommited or only NAs come out
+daily_rev$ma7 <- ma(daily_rev$revenue, order=7) 
+daily_rev$ma30 <- ma(daily_rev$revenue, order=30)
+
+daily_rev %>%
+  ggplot() +
+    geom_line(aes(x = Date, y = revenue)) +
+    geom_line(aes(x = Date, y = ma7,   colour = "Weekly Moving Average"))  +
+    geom_line(aes(x = Date, y = ma30,   colour = "Monthly Moving Average"))  +
+    scale_x_date(breaks = date_breaks("months"), date_labels = "%b-%y") + 
+    theme(axis.text.x = element_text(angle = 45), legend.position="bottom") + 
+    labs(x = "Invoice Date", title = 'Value over Time') 
+```
+
+The monthly and weekly moving averages look very similar to the `loess` estimations.
+
+Let's sum the value per month of the year and plot them.
+
+```{r, echo=F}
+monthly_rev <- dfs %>% 
+        mutate(Date = as.Date(as.yearmon(dfs$InvoiceDateTime, "%m/%Y"))) %>%
+        group_by(Date) %>%
+        summarise(revenue = sum(Value)) 
+
+ggplot(aes(x = Date, y = revenue, group = 1), data = monthly_rev) +
+  geom_line() +
+    # geom_smooth(method = "loess", color = "blue", span = 1/13)+
+    geom_smooth(method = "loess", color = "orange", span = 1) +
+    scale_x_date(breaks = date_breaks("months"), date_labels = "%b-%y") +
+    theme(axis.text.x = element_text(angle = 45)) + 
+    labs(x = "Invoice Month") + 
+    ggtitle('Sum of Revenue per Month (Until the 99th quatile of Value)')
+
+```
+
+The monthly pattern is not obvious here. We observe a decline until February , then two consecutive and increasing peaks at March and May , a decline again and ten a very steep increase starting August 2011. 
+
+We will try to confirm our observations using a time-series decomposition model.
+
+## Time Series
+
+We will  calculate the seasonality:
+
+```{r, echo=F, warning=F, message=F}
+# Time Series Decomposition
+
+# Pad the the days without values with nans
+daily_rev <- daily_rev %>% pad()
+
+rev = ts(daily_rev[, 2])
+rev[is.na(rev)] <- 0
+
+# Compute Seasonality
+p = periodogram(rev)
+
+dd = data.frame(freq=p$freq, spec=p$spec)
+order = dd[order(-dd$spec),]
+order$time <- 1/order$f
+top2 = head(order, 10)
+top2
+```
+
+We padded the Saturday values that where missing to create a univariate daily time series and created a periodogramm.
+
+We see that there are indeed seasonal patterns in our dataset although not monthly as we expected. The  most important seasonalities are every 3.5 and 6.9 days followed 187.5 and 375.0. 
+
+The 3.5 suggest that there may be some sub-weekly seasonality and 6.9 is a weekly seasonality that is expected at daily univariate time series.  
+The times closer to a monthly seasonality (37.5 and 31.25) have lower frequency and our observation of a monthly seasonality is not confirmed by the periodogramm.
+
+In addition to volatility, modeling daily level data might require specifying multiple seasonality levels, such day of the week, week of the year, month of the year, holidays, etc.
+
+For the sake of simplicity, we will model using a frequency of 7 (weekly).
+
+```{r, echo=F, warning=F, message=F}
+
+ts = ts(rev, frequency = 7)
+
+# The series looks multiplicative
+decompose = decompose(ts, "multiplicative")
+#
+plot(as.ts(decompose$seasonal))
+plot(as.ts(decompose$trend))
+plot(as.ts(decompose$random))
+plot(decompose)
+```
+
+- The trend looks similar to the monthly moving average we plotted earlier and does still seem to contain a irregular monthly to bimonthly pattern.
+- We can also see that there is quite a lot of noise confirming the volatility and high amount of outliers we have in our dataset.
+- The missing Saturday values are obvious at the seasonality pattern as well as a weekly peak. Which day would that be?
+
+
+```{r echo=FALSE}
+p1 <- aggregate(cbind(no_of_items = InvoiceNo) ~ InvoiceMonth, 
+          data = dfs, 
+          FUN = function(x){NROW(x)}) %>%
+          ggplot(aes(InvoiceMonth, no_of_items)) +
+          geom_col(fill = "lightslateblue") +
+          theme_bw(base_size = 10)  +
+          ggtitle('No of items bought per Month')
+
+p2 <- aggregate(cbind(revenue = Value) ~ InvoiceMonth, 
+          data = dfs, 
+          FUN = sum) %>%
+          ggplot(aes(InvoiceMonth, revenue)) +
+          geom_col(fill = "lightseagreen") +
+          theme_bw(base_size = 10)  +
+          ggtitle('Revenue per Month')
+          
+grid.arrange(p1, p2, ncol = 2)
+```
+
+- The number of transactions and revenue increases towards the end of the year with a peak in
+November. 
+- The minimum for both transactions and revenue is in February.
+
+
+```{r echo=FALSE}
+p1 <- aggregate(cbind(no_transactions = StockCode) ~ InvoiceWday, 
+          data = dfs, 
+          FUN = function(x){NROW(x)}) %>%
+          ggplot(aes(InvoiceWday, no_transactions)) +
+          geom_col(fill = "lightslateblue") +
+          ggtitle('No of items bought per Week day')
+
+p2 <- aggregate(cbind(revenue = Value) ~ InvoiceWday, 
+          data = dfs, 
+          FUN = sum) %>%
+          ggplot(aes(InvoiceWday, revenue)) +
+          geom_col(fill = "lightseagreen") + 
+          ggtitle('Revenue per Week day')
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+- We observe an increasing of transactions and revenue through the week with the peak on Thursday 
+- No transactions seem to happen on Saturday.
+
+
+```{r echo=FALSE}
+p1 <- aggregate(cbind(no_transactions = StockCode) ~ InvoiceHour, 
+          data = dfs, 
+          FUN = function(x){NROW(x)}) %>%
+          ggplot(aes(InvoiceHour, no_transactions)) +
+          geom_col(fill = "lightslateblue") +
+          ggtitle('No of items bought per hour of the day') + 
+          labs(x='')
+
+p2 <- aggregate(cbind(revenue = Value) ~ InvoiceHour, 
+          data = dfs, 
+          FUN = sum) %>%
+          ggplot(aes(InvoiceHour, revenue)) +
+          geom_col(fill = "lightseagreen") + 
+          ggtitle('Revenue per per hour of the day') + 
+          labs(x='')
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+- Most of the orders and the highest revenue happen at the middle of the day (12.00 and 13.00).
+- The distribution of orders and revenue looks almost normal
+
+```{r echo=FALSE}
+
+p1 <- df %>%
+        group_by(InvoiceYear) %>%
+        summarize(n = n()) %>%
+          ggplot(aes(InvoiceYear, n)) +
+          geom_col(fill = "lightslateblue") +
+          scale_x_continuous(breaks=c(2010, 2011)) +
+          labs(x = '', title = 'No of transactions per year')
+
+p2 <- df %>%
+        filter(df$Value < quantile(df$Value, 0.99) & df$Date < '2011-12-1') %>%
+        group_by(InvoiceYear) %>%
+        summarize(revenue = sum(Value)) %>%
+          ggplot(aes(InvoiceYear, revenue)) +
+          geom_col(fill = "lightseagreen") + 
+          scale_x_continuous(breaks=c(2010, 2011)) +
+          labs(x = '', title = 'Revenue per year')
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+Results per year are as expected from our previous observations
+
+## UnitPrice
+
+```{r, echo=FALSE}
+# Corrrelation between Unit Price and hour
+ggplot(aes(x = InvoiceHour, y = UnitPrice), data = dfs) + 
+  geom_point(alpha = 1/20) +
+  geom_boxplot(alpha = 1/20, aes(group = dfs$InvoiceHour))
+```
+
+We see that the distribution of price is mostly similar between the different hours in the working day and that most of the Unitprices fall beyond 5 Sterling with a median around 2. 
+
+Interestingly the items bought very early in the morning have a higher unit price
+
+How does the picture look if we plot the unit price against wdays?
+
+```{r, echo=FALSE}
+# Corrrelation between Unit Price and hour
+ggplot(aes(x = factor(InvoiceWday), y = UnitPrice,
+           colour = InvoiceWday), data = dfs) + 
+  geom_point(alpha = 1/20) +
+  geom_boxplot(alpha = 1/20, aes(group = InvoiceWday)) + 
+  scale_colour_brewer(type = 'qual', palette = 'Dark2') +
+  theme(legend.position = "None")
+```
+
+Distribution of UnitPrice is fairly similar for all weekdays.
+
+UnitPrice vs Datetime
+
+```{r, echo=FALSE, include=F}
+ggplot(aes(x = InvoiceDateTime, y = UnitPrice), data = dfs) + 
+  geom_point(alpha = 1/100) +
+  stat_smooth(method = 'lm')
+  theme(legend.position="bottom")
+```
+ 
+- We observe visible unit price lines which suggest a more continuous price range at lower price and more distinct prices the higher they get.
+- The blue line depicts the linear trend and there does not seem to exist a clear time trend although it is slightly decreasing.
+
+
+## Country
+
+```{r, echo=F, message=F, warning=F}
+# Group revenue acc. to country
+country_rev <- dfs %>%
+  group_by(Country) %>%
+  summarise(revenue = sum(Value)) %>%
+  arrange(desc(revenue))
+
+mapped_data <- joinCountryData2Map(country_rev, joinCode = 'NAME', 
+                                   nameJoinColumn = "Country")
+```
+
+```{r, echo=F, message=F, warning=F}
+# Plot a world map - Using logFixedWidth to get some resolution for the rest of the countries
+par(mai=c(0,0,0.2,0), xaxs="i",yaxs="i")
+mapCountryData(colourPalette = 'topo', missingCountryCol = 'grey', catMethod ='logFixedWidth',  mapped_data, nameColumnToPlot = "revenue")
+```
+
+
+```{r, echo=F, message=F, warning=F}
+# Revenue per country bar plot
+country_rev %>%
+  ggplot(aes(x = reorder(Country, revenue), y = revenue)) + 
+   geom_bar(stat = 'identity', fill='goldenrod', colour="black") +
+   coord_trans(x = 'log') +
+   coord_flip() +
+   theme_bw(base_size = 7)  +
+   labs(title="", y ="Revenue", x = '')
+```
+
+- There are 5 country codes in the data tha do not correspond to existing countries, like `unspecified` or `European Community`.
+- The revenue is the highest in the UK as expected but the store has presence in quite few countries.
+- Most of the countries here there are sales are developed.
+- The only continent that is not represented is Africa.
+
+
+How many?
+
+```{r, echo=FALSE}
+country_rev %>% nrow()
+```
+
+Let's see how their sales look like without he UK.
+
+```{r, echo=F, message=F, warning=F}
+# Revenue per country bar plot
+country_rev %>% filter(Country != 'United Kingdom') %>%
+  ggplot(aes(x = reorder(Country, revenue), y = revenue)) + 
+   geom_bar(stat = 'identity', fill='goldenrod', colour="black") +
+   coord_trans(x = 'log') +
+   coord_flip() +
+   theme_bw(base_size = 7)  +
+   
+   labs(title="", y ="Revenue", x = '')
+```
+
+Most sales are in European countries, channel islands :) and Australia.
+
+What is the relationship of country to the average UnitPrice?
+
+```{r, echo=F, message=F, warning=F}
+country_price <- dfs %>%
+  group_by(Country) %>%
+  summarise(avg_unit_price = mean(UnitPrice)) %>%
+  arrange(desc(avg_unit_price))
+
+country_price %>%
+   ggplot(aes(x = reorder(Country, avg_unit_price), y = avg_unit_price)) + 
+   geom_bar(stat = 'identity', fill='darkolivegreen', colour="black") +
+   coord_flip() +
+   theme_bw(base_size = 7)  +
+   
+   labs(title="", y ="Avg Unit Price", x = '')
+
+```
+
+The highest average `UnitPrice` is in Lebanon! UK is in the middle of the list.
+
+I wonder if there is any relationship between the total revenue of the country  and the average unit price per country.
+
+```{r, echo=F, message=F, warning=F}
+country_rev_price <- dfs %>%
+  group_by(Country) %>%
+  summarise(avg_unit_price = mean(UnitPrice), sum_revenue = sum(Value)) %>%
+  arrange(desc(avg_unit_price))
+
+  country_rev_price %>%
+  ggplot(aes(x = avg_unit_price, y = log10(sum_revenue))) +
+  geom_point() +
+  geom_smooth(method = 'lm', color = 'red')
+```
+```{r, echo=F, message=F, warning=F}
+with(country_rev_price , cor.test(avg_unit_price, sum_revenue))
+with(country_rev_price , cor.test(avg_unit_price, log10(sum_revenue)))
+```
+
+- Used log transformation of the y axis to make the relationship better to see.
+- No correlation is visible in the scatter plot between the average unit price and the sum of value per country.
+- The correlation is weak and negative and does not change much for log.
+
+```{r, echo=F, message=F, warning=F}
+country_avgrev_avgprice <- dfs %>%
+  group_by(Country) %>%
+  summarise(avg_unit_price = mean(UnitPrice), avg_revenue = mean(Value))
+
+  country_avgrev_avgprice  %>%
+  ggplot(aes(x = avg_unit_price, y = avg_revenue)) +
+  geom_point() +
+  geom_smooth(method = 'lm', color = 'red')
+```
+
+
+
+```{r, echo=F, message=F, warning=F}
+with(country_avgrev_avgprice , cor.test(avg_unit_price, avg_revenue))
+```
+
+There seems to be a strong positive correlation between average revenue and average unit price. It is logical since unit price is a component of revue.
+
+Let's see which countries have the highest average revenue.
+
+```{r, echo=F, message=F, warning=F}
+country_avgrev_avgprice %>%
+   ggplot(aes(x = reorder(Country, avg_revenue), y = avg_revenue)) + 
+   geom_bar(stat = 'identity', fill='cadetblue2', colour="black") +
+   coord_flip() +
+   theme_bw(base_size = 7)  +
+   
+   labs(title="", y ="Avg Revenue", x = '')
+```
+
+This looks the same as the plot with the average unit price per country.
+
+It does make sense as the average revenue is the Value/No of Transactions and the higher the average unit price the higher this will be.
+
+How many customers per country?
+
+```{r, echo=F, message=F, warning=F}
+country_no_customer<- dfs %>%
+  group_by(Country) %>%
+  summarise(no_customer = uniqueN(CustomerID)) %>%
+  arrange(desc(no_customer))
+
+country_no_customer %>%
+   ggplot(aes(x = reorder(Country, no_customer), y = no_customer)) + 
+   geom_bar(stat = 'identity', fill='darkolivegreen2', colour="black") +
+   coord_flip() +
+   theme_bw(base_size = 7)  +
+   
+   labs(title="", y ="No of customers", x = '')
+```
+
+The order is the the same as in the number of customers as per revenue.
+
+Which are the customers with the most transactions and Revenue
+
+# Bivariate Analysis
+
+- The revenue and no. of transactions had a small decline until the the begin of the third quarter of 2011 when they started a sharp incline.
+- Most transactions and the highest revenue happens on Thursdays and in the middle of the day
+- There are no transactions on Saturdays.
+- The time series decomposition  revealed a weekly seasonality , a big amount of noise and random variance in value
+- There seems to be a monthly-bimonthly seasonality that is hard to discern.
+
+### What was the strongest relationship you found?
+- Average Unit price and average value are strongly correlated
+- Very early in the morning unit prices are on average higher
+
+# Multivariate Plots Section
+
+UnitPrice Vs InvoiceHour Per Day.
+
+```{r, echo=FALSE}
+# Corrrelation between Unit Price and hour
+ggplot(aes(x = factor(InvoiceHour), y = UnitPrice,
+           colour = InvoiceWday), data = dfs) + 
+  geom_point(alpha = 1/20) +
+  geom_violin(alpha = 1/20, aes(group = InvoiceHour)) + 
+  scale_colour_brewer(type = 'qual', palette="Accent", aes(group = dfs$InvoiceHour)) +
+  theme(legend.position="bottom")
+```
+
+It is very interesting to note that all transaction after 18.00 and before 06.00 happen mainly on Thursday.
+
+Is it a specific customer or country driving these transactions?
+
+UnitPrice Vs InvoiceHour Per Country.
+
+```{r, echo=FALSE, fig.height=7, fig.width=8}
+ggplot(aes(x = InvoiceHour, y = UnitPrice, colour = factor(Country), legend = F),
+       data = dfs) + 
+  geom_point(alpha = 1/20) +
+  facet_wrap(~Country) +
+  guides(colour=FALSE) 
+```
+
+- We do see that countries with a higher total revenue have a more spread out pattern of purchases through the day.
+ - It is not easy to see some correlation with the pattern of purchasing later mainly on Thursdays.
+- Customers from Sweden seem to only buy low priced items.
+
+```{r, echo=FALSE, fig.height=7, fig.width=8}
+ggplot(aes(x = InvoiceWday, y = UnitPrice, colour = factor(Country), legend = F),
+       data = dfs) + 
+  geom_point(alpha = 1/20) +
+  facet_wrap(~Country) +
+  guides(colour=FALSE) 
+```
+
+- Customers from Lebaanon and RSA seem to buy only on Thursdays but they are not late- hour buyers according  to the previous plot.
+- This plot does not seem to answer what is driving the relationship between buying on Thursday ad late hours.
+
+UnitPrice Vs InvoiceWDay Per Hour.
+
+```{r, echo=FALSE, fig.width=9}
+# Increase the number of colors
+# mycolors = colorRampPalette(brewer.pal(name="Blues", n = 8))(15)
+
+# Alternative by concatenating palettes
+mycolors = c(brewer.pal(name="Blues", n = 8),
+             brewer.pal(name="Oranges", n = 6),
+             'red4')
+
+
+ggplot(aes(x = factor(InvoiceWday), y = UnitPrice,
+           colour = factor(InvoiceHour)), data = dfs) + 
+  geom_point(alpha = 1/20) +
+  geom_boxplot(alpha = 1/20, aes(group = InvoiceWday)) + 
+  scale_color_manual(values = mycolors) + 
+  guides(colour = guide_legend(override.aes = list(size = 5))) + 
+  theme(legend.position="right",
+        legend.title = element_text('Invoice Hour'),
+        legend.text = element_text(size=8),
+        legend.box = "vertical")
+```
+
+Not easy to discern a pattern here except that it looks like Thursday has indeed more orders after 17.00 (deepeer red colour is visible) and most low price orders are later in the day.
+
+UnitPrice Vs InvoiceDateTime Per WeekDay.
+
+```{r, echo=FALSE}
+ggplot(aes(x = InvoiceDateTime, y = UnitPrice, color=(factor(InvoiceWday))), data = dfs) + 
+  geom_point(alpha = 1/20) +
+  scale_color_brewer(type = 'div',
+  guide = guide_legend(title = 'WeekDay', reverse = F,
+  override.aes = list(alpha = 1, size = 2))) +
+  theme(legend.position="bottom")
+```
+
+We observe the sequential order of week days with a break we saw earlier in January happening after a Thursday and a small gap between Thursdays in May.
+
+
+```{r, echo = FALSE}
+country_rev_price <- dfs %>%
+  group_by(Country) %>%
+  summarise(avg_unit_price = mean(UnitPrice), sum_revenue = sum(Value)) %>%
+  ungroup() %>%
+  arrange(desc(sum_revenue)) %>%
+  slice(1:20)
+
+country_rev_price %>%
+    ggplot(aes(x = avg_unit_price, y = log10(sum_revenue), colour = factor(Country), 
+               size =log10(sum_revenue))) +
+      geom_point() +
+      geom_text(aes(label = Country), color = "black", 
+        position = "jitter", hjust=0.6, vjust=1.1, size = 2.5) +
+      # coord_trans(y = 'log10') + 
+      # geom_smooth(method = 'lm', color = 'red') + 
+      theme_minimal() +
+      geom_vline(xintercept = 3) + geom_hline(yintercept = mean(log10(country_rev_price$sum_revenue)))+
+      theme(legend.position="none") +
+      labs(title = 'Country Quadrant plot of log10(Sum of Value) vs the Avg Unit Price')
+```
+
+
+We see that the UK has the highest revenue but a moderate average unit price wile Spain and EIRE have higher than average revenues and higher average unit prices as well.
+
+Channel Islands has the highest average unit price and revenue just slightly less that average.
+
+Germany and France have higher sales than average but relatively low prices.
+
+Netherlands is has the lowest price and average sales.
+
+Which are the biggest customers and where do they come from?
+
+```{r echo=F, message=F, warning=F, results="hide"}
+customer_country_sumrev <- dfs %>%
+                          group_by(CustomerID, Country) %>%
+                          summarise(sum_revenue = sum(Value)) %>%
+                          # got to ungroup first in order to use arrange
+                          ungroup() %>% 
+                          arrange(desc(sum_revenue)) %>%
+                          slice(1:100)
+
+customer_country_sumrev %>% 
+   ggplot(aes(x = reorder(CustomerID, sum_revenue), y = sum_revenue, colour = Country, fill = Country)) + 
+   geom_bar(stat = 'identity') +
+   coord_flip() +
+   theme_bw(base_size = 7)  +
+   scale_fill_brewer(palette="Paired")+
+   scale_colour_brewer(palette="Paired")
+   labs(title="", y ="Sum of Revenue", x = 'Customer ID')
+```
+
+It is interesting to note the that the biggest customer is from EIRE and together with Australia and UK that dominates the number of appearances are the only ones in the top 50.
+
+# Final Plots and Summary
+
+### Plot One
+
+```{r, echo=F, message=F, warning=F, fig.height=10}
+daily_rev <- df %>% 
+            mutate(Date = as.Date(df$InvoiceDateTime)) %>%
+            filter(df$Value < quantile(df$Value, 0.99) & df$Date < '2011-12-1') %>%
+            group_by(Date) %>%
+            summarise(revenue = sum(Value)) 
+
+daily_rev <- na.omit(daily_rev)
+# All NAs have to be ommited or only NAs come out
+daily_rev$ma7 <- ma(daily_rev$revenue, order=7) 
+daily_rev$ma30 <- ma(daily_rev$revenue, order=30)
+
+p1 <- daily_rev %>%
+  ggplot() +
+    geom_line(aes(x = Date, y = revenue)) +
+    geom_line(aes(x = Date, y = ma7,   colour = "Weekly Moving Average"))  +
+    geom_line(aes(x = Date, y = ma30,   colour = "Monthly Moving Average"))  +
+    scale_x_date(breaks = date_breaks("months"), date_labels = "%b-%y") + 
+    theme(axis.text.x = element_text(angle = 45), legend.position="bottom") + 
+    labs(x = "Invoice Date", title = 'Daily sum of Value over Time') 
+
+p2 <- aggregate(cbind(revenue = Value) ~ InvoiceWday, 
+          data = dfs, 
+          FUN = sum) %>%
+          ggplot(aes(InvoiceWday, revenue)) +
+          geom_col(fill = "lightseagreen") + 
+          ggtitle('Revenue per Week day')
+
+p3 <- aggregate(cbind(revenue = Value) ~ InvoiceHour, 
+          data = dfs, 
+          FUN = sum) %>%
+          ggplot(aes(InvoiceHour, revenue)) +
+          geom_col(fill = "lightseagreen") + 
+          ggtitle('Revenue per hour of the day') + 
+          labs(x='')
+
+ggdraw() +
+  draw_plot(p1, x = 0, y = .5, width = 1, height = 0.5) +
+  draw_plot(p2, x = 0, y = 0, width = .5, height = .5) +
+  draw_plot(p3, x = .5, y = 0, width = .45, height = .5) 
+```
+
+### Description One
+
+In this plot we can observe the daily revenue patterns over time as well as the  and time trends of the aggregated revenue per day of the wee and hour of the day.
+
+The main observations are:
+
+- The number of transactions and revenue increases towards the end of the year with a peak in
+November. 
+- The minimum for both transactions and revenue is in February.
+- We observe an increasing of transactions and revenue through the week with the peak on Thursday 
+- No transactions seem to happen on Saturday.
+- Most of the orders and the highest revenue happen at the middle of the day (12.00 and 13.00).
+- The distribution of orders and revenue looks almost normal
+
+### Plot Two
+
+```{r, echo=F, message=F, warning=F}
+# Plot a world map - Using logFixedWidth to get some resolution for the rest of the countries
+par(mai=c(0,0,0.2,0), xaxs="i",yaxs="i")
+mapCountryData(colourPalette = 'topo', missingCountryCol = 'grey', catMethod ='logFixedWidth',  mapped_data, nameColumnToPlot = "revenue",  mapTitle = "Global Map per Revenue")
+
+# Revenue per country bar plot
+country_rev %>%
+  ggplot(aes(x = reorder(Country, revenue), y = revenue)) + 
+   geom_bar(stat = 'identity', colour="black") +
+   coord_trans(x = 'log') +
+   coord_flip() +
+   theme_bw(base_size = 7)  +
+   labs(title="Country bar-plot per Revenue", y ="Revenue", x = 'Country')
+```
+
+### Description Two
+
+In this plot we can see a map with all the countries that appear in the dataset coloured according to their revenue and a bar plot to help visualize the relative size of each country's revenue.
+
+The main observations are:
+
+- The revenue is the highest in the UK as expected but the store has presence in quite few countries (37).
+ - UK is dominating the countries with 88.9% of occurrences which makes the sense since that is where the online store is based.
+- We observe another small group of countries (Germany, France, Eire) above  the others that have a much higher number of occurrences than the rest. 
+- Most of the sales are in developed countries.
+- The only continent that is not represented is Africa.
+
+### Plot Three
+
+```{r, echo = FALSE}
+country_rev_price <- dfs %>%
+  group_by(Country) %>%
+  summarise(avg_unit_price = mean(UnitPrice), sum_revenue = sum(Value)) %>%
+  ungroup() %>%
+  arrange(desc(sum_revenue)) %>%
+  slice(1:20)
+
+country_rev_price %>%
+    ggplot(aes(x = avg_unit_price, y = log10(sum_revenue), colour = factor(Country), 
+               size =log10(sum_revenue))) +
+      geom_point() +
+      geom_text(aes(label = Country), color = "black", 
+        position = "jitter", hjust=0.6, vjust=1.1, size = 2.5) +
+      # coord_trans(y = 'log10') + 
+      # geom_smooth(method = 'lm', color = 'red') + 
+      theme_minimal() +
+      geom_vline(xintercept = 3) + geom_hline(yintercept = mean(log10(country_rev_price$sum_revenue)))+
+      theme(legend.position="none") +
+      labs(title = 'Country Quadrant plot of log10(Sum of Value) vs the Avg Unit Price',
+           y='log10(Sum of Revenue)', x= 'Avg Unit Price')
+```
+
+### Description Three
+
+In this plot we observe a quadrant where each country is positioned according to their relative log10 of the sum of revenue and their average unit price. The size of the point is driven by the revenue and the colour by the country.
+
+The main observations are:
+
+- We see that the UK has the highest revenue but a moderate average unit price wile Spain and EIRE have higher than average revenues and higher average unit prices as well.
+- Channel Islands has the highest average unit price and sell just slightly less that average.
+- Germany and France have higher sales than average but relatively low prices
+- Netherlands is has the lowest price and average sales
+
+------
+
+# Reflection
+
+E-commerce is one of the fastest growing economic sectors worldwide. Typically e-commerce datasets are proprietary and consequently hard to find among publicly available data. 
+
+However, The UCI Machine Learning Repository has made this dataset containing actual transactions from 2010 and 2011. The dataset is maintained on their site, where it can be found by the title "Online Retail".
+
+The dataset can also be found at Kaggle [E-Commerce Data](https://www.kaggle.com/carrie1/ecommerce-data)
+
+I chose this dataset as I felt it accurately represented real world datasets  and wanted get the experience exploring it.
+
+One of the main challenges I faced, is the open ended nature of EDA and the endless possibilities of explorations and transformations that are possible and having to draw the line and create a narrative out of the existing visualizations and explorations.
+
+Besides the basic univariate exploration in this EDA I chose to get a general idea of the the patterns  and change over time and it's components(Weekly, monthly, hourly) in the data, and asses it's potential for predicting future customer behaviour.
+Additionally I explored possible differences in these patterns between different countries.
+
+The main issues I faced during the analysis: 
+
+- Very skewed distributions with a big percentage of outliers.
+- The transactions happen over a relative short time period making predictions and observations weaker.
+- The amount of items and transactions is quite big ,increasing the computational ad plotting time to problematic levels at times.
+- UK is dominating the sales making country a poor predictor to use in modelling sales behavior.
+
+## Future Work
+
+This was just the beginning. In the future I intend to proceed wit the following analyses:
+
+- Cohort analysis.
+- Churn prediction.
+- Customer basket prediction.
+- Customer segmentation.
+- Time Series forecasting.
+
+# Sources
+
+- Date axis breaks: https://stackoverflow.com/questions/17758006/time-series-plot-with-x-axis-in-year-month-in-r
+- strttime formatting: http://strftime.org/
+- Get month-year out of datetime: https://stackoverflow.com/questions/41122645/lubridate-how-to-parse-month-year 
+- Change Rstudio Locale: https://stackoverflow.com/questions/5345132/sys-setlocale-request-to-set-locale-cannot-be-honored
+- Manipulate RMD output: https://yihui.name/knitr/demo/output/
+- Pad missing datetime entries (to univariate): https://stackoverflow.com/questions/16787038/insert-rows-for-missing-dates-times
+- Replace nans with 0: https://stackoverflow.com/questions/8161836/how-do-i-replace-na-values-with-zeros-in-an-r-dataframe
+- Detect Seasonality using Fourier Transform: https://anomaly.io/detect-seasonality-using-fourier-transform-r/
+- Extract Seasonal & Trend: using decomposition in R: https://anomaly.io/seasonal-trend-decomposition-in-r/
+- Seasonal periods in R: https://robjhyndman.com/hyndsight/seasonal-periods/
+- Times Series Tutorial: https://ec.europa.eu/eurostat/sa-elearning/components-%E2%80%93-overview
+- Dplyr and pipes: http://seananderson.ca/2014/09/13/dplyr-intro.html
+- Override aes with manual colour - https://stackoverflow.com/questions/29307725/using-override-aes-in-ggplot2-with-layered-symbols-r
