@@ -1,7 +1,7 @@
-# Explore and Summarize Data
+# Explore and Summarize E-commerce Data with R
 **Ioannis K Breier**
 
-## Explore and summarize Data with R. Project 5 of the Udacity Data Analyst Nanodegree.
+### Project 5 of the Udacity Data Analyst Nanodegree.
 
 
 E-commerce is one of the fastest growing economic sectors worldwide. Typically e-commerce datasets are proprietary and consequently hard to find among publicly available data.
