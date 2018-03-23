@@ -2,7 +2,7 @@
 ### Project 5 of the Udacity Data Analyst Nanodegree.
 **Ioannis K Breier**
 
-![](download (1).png)
+![](map.png)
 
 
 E-commerce is one of the fastest growing economic sectors worldwide. Typically e-commerce datasets are proprietary and consequently hard to find among publicly available data.
