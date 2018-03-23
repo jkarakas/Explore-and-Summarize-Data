@@ -13,4 +13,4 @@ The dataset can also be found at Kaggle E-Commerce Data
  
 In this project I use exploratory data analysis techiques in R to to identify meaningful relationships, patterns, or trends.
 
-[Project Report]()
+[Project Report](https://jkarakas.github.io/Explore-and-Summarize-Data/analysis.html)
