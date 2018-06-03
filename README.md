@@ -1,5 +1,4 @@
 # Explore and Summarize E-commerce Data with R
-### Project 5 of the Udacity Data Analyst Nanodegree.
 **Ioannis K Breier**
 
 ![](map.png)
